@@ -1,0 +1,89 @@
+name: Setup and Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  setup-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find and extract ZIP
+        run: |
+          ZIP_FILE=$(ls *.zip 2>/dev/null | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found ZIP: $ZIP_FILE"
+            rm -f README.md
+            unzip -o "$ZIP_FILE"
+            rm -f "$ZIP_FILE"
+          else
+            echo "No ZIP file found, using existing files"
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK manually
+        run: |
+          export ANDROID_SDK_ROOT=$HOME/android-sdk
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          rm cmdtools.zip
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Create local.properties with tokens
+        run: |
+          echo 'TMDB_BEARER_TOKEN=eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIxMzRjYTA1NDlmZTZjY2RmOTkyYWVkZGMyYmZiMzlmNiIsIm5iZiI6MTc3NzIyMTIwOC4wMjU5OTk4LCJzdWIiOiI2OWVlM2U1OGQzNThmMDhjNDUyOGRjZTAiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.CKXcYHhcQHKW3tIuDViHCQwAu6-hh--hoopAnDUeIUM' >> local.properties
+          echo 'TMDB_API_KEY=134ca0549fe6ccdf992aeddc2bfb39f6' >> local.properties
+
+      - name: Download and setup Gradle
+        run: |
+          rm -f gradlew
+          rm -rf gradle/wrapper
+          wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip -O gradle.zip
+          unzip -q gradle.zip
+          export PATH=$PWD/gradle-8.5/bin:$PATH
+          gradle wrapper --gradle-version 8.5
+          rm -rf gradle.zip gradle-8.5
+          chmod +x gradlew
+
+      - name: Fix dependency versions in build.gradle.kts
+        run: |
+          if [ -f app/build.gradle.kts ]; then
+            sed -i "s|converter-kotlinx-serialization:2.9.0|converter-kotlinx-serialization:2.11.0|g" app/build.gradle.kts
+            sed -i "s|tv-material:1.0.0-alpha11|tv-material:1.0.0-alpha10|g" app/build.gradle.kts
+            sed -i "s|tv-foundation:1.0.0-alpha11|tv-foundation:1.0.0-alpha10|g" app/build.gradle.kts
+          fi
+
+      - name: Fix AppModule.kt toMediaType
+        run: |
+          APP_MODULE="app/src/main/java/com/example/moviecatalog/di/AppModule.kt"
+          if [ -f "$APP_MODULE" ]; then
+            sed -i "s|json.asConverterFactory(\"application/json\".toMediaType())|json.asConverterFactory(okhttp3.MediaType.Companion.toMediaType(\"application/json\"))|g" "$APP_MODULE"
+            sed -i "/^private fun String.toMediaType/d" "$APP_MODULE"
+            sed -i "/return okhttp3.MediaType.Companion.toMediaType(this)/d" "$APP_MODULE"
+            echo "Fixed AppModule.kt"
+          fi
+
+      - name: Build Debug APK
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MovieCatalog-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
